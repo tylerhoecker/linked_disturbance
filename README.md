@@ -6,3 +6,5 @@ Google docs notes: https://docs.google.com/document/d/1uq4Rvwfc0DQsSeZC_zFg_x7x_
 Mostly DAGs
 
 https://www.when2meet.com/?18835294-Q4NzE
+
+Google Drive: https://drive.google.com/drive/folders/1xN0oNzswBmFVfSu_J2wQL3A9ZrswbatN
