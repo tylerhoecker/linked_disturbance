@@ -1,5 +1,7 @@
 # Don't put the data on GitHub
 data/
+docs/
+figs/
 
 # History files
 .Rhistory
