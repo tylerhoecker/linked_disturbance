@@ -1,3 +1,6 @@
+# Don't put the data on GitHub
+data/
+
 # History files
 .Rhistory
 .Rapp.history
