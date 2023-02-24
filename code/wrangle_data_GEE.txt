@@ -1,0 +1,341 @@
+////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////// SETUP //////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////
+
+//Download standard environmental data
+//Tyler L. McIntosh, CU Boulder Earth Lab, 2/24/2022
+
+///////Explanation of analysis
+//When script is run, prepared downloads of data will be populated in the 'tasks' panel.
+//Select the variables of interest by clicking 'Run'
+//Before running, change user-set parameters below
+
+//Data download options include:
+//DEM, Slope, Aspect, Hillshade, NLCD landcover, GAPConusCover2011, Landfire BPS, ModisVCF, PDSI, SPEI30D/1Y/5Y
+
+
+///////Naming conventions wherever possible:
+//lowerCamelCase for variables
+//underscore_separated for files & functions
+
+///////Data inputs & outputs
+// INPUTS:
+// an aoi chosen from epa_lvl3 (EPA Ecoregions at the level 3 category)
+// OUTPUTS:
+// .tif files of standard data exported for further analysis
+
+////////////////////////////////// USER-SET PARAMETERS /////////////////////////////////////
+
+//Google Drive folder for outputs
+var folderName = 'GEE_Exports';
+
+//Set output projection
+var projection = 'EPSG:32613';
+
+//Select timeframe of interest
+var startYear = 1999;
+var endYear = 2020;
+var startDate = '1999-01-01';
+var endDate = '2020-12-31';
+
+//Select EPA region of interest
+//print('EPA Level 3 Ecoregions:', epa_lvl3);
+var aoiRegion = '6.2.14'; //CHOOSE EPA NA_L3CODE OF INTEREST
+var regionReadable = 'SouthernRockies'; //Human-readable region name for output files
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////// Analysis /////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////// PREP ///////////////
+
+//Javascript version of imports
+var dem = ee.Image("USGS/SRTMGL1_003"),
+    modisVCF = ee.ImageCollection("MODIS/006/MOD44B"),
+    drought = ee.ImageCollection("GRIDMET/DROUGHT"),
+    gridmet = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET"),
+    nlcd = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD"),
+    epa_lvl3 = ee.FeatureCollection("users/tymc5571/EPA_EcoLvl3"),
+    gapConusCover = ee.Image("USGS/GAP/CONUS/2011"),
+    landfireBPS = ee.ImageCollection("LANDFIRE/Vegetation/BPS/v1_4_0");
+
+//Filter to selected AOI and create a raster mask
+var aoi = epa_lvl3.filter(ee.Filter.eq('NA_L3CODE', aoiRegion));
+print('AOI:', aoi);
+var aoiRast = aoi.reduceToImage({ //Reduce to raster for masking
+  properties: ['Shape_Area'], //Reducing by shape area since we don't care what the number is, just need any number
+  reducer: ee.Reducer.first() //There shouldn't be any overlap between features, so this is sufficient
+}).remap({ //Then remap any value to 1 via default value (have to have something in 'from' and 'to' to avoid error)
+  from: [1],
+  to: [1],
+  defaultValue: 1
+});
+Map.addLayer(aoiRast);
+var mask = aoiRast.eq(1);
+
+//Years
+var years = ee.List.sequence(startYear, endYear);
+
+//////////// SIMPLE DATA TO PULL AND MASK ////////////////
+
+//Calculate slope & aspect
+//Export these separately since don't have compatibile data types
+var slope = ee.Terrain.slope(dem).updateMask(mask);
+var aspect = ee.Terrain.aspect(dem).updateMask(mask);
+var hillshade = ee.Terrain.hillshade(dem).updateMask(mask);
+
+//Get NLCD
+var landcover = nlcd.select('landcover').toBands().updateMask(mask);
+print("Landcover data:", landcover);
+
+//Get ModisVCF and change band names so that numbers aren't first (annoying in R)
+
+//Function to fix ModisVCF names
+var take_date_off_front_put_at_back = function(im) {
+  var ogNames = im.bandNames();
+  
+  var string_manip = function(str) {
+    str = ee.String(str);
+    return str.slice(11).cat('_').cat(str.slice(0,10));
+  };
+  
+  var newNames = ogNames.map(string_manip);
+  
+  return im.rename(newNames);
+};
+
+//Select the band of interest from the image collection, turn into a single image with band for each year, mask to AOI, fix band names
+var modisPercTreeCov = take_date_off_front_put_at_back(modisVCF.select('Percent_Tree_Cover').toBands().updateMask(mask));
+var modisPercNonTreeVeg = take_date_off_front_put_at_back(modisVCF.select('Percent_NonTree_Vegetation').toBands().updateMask(mask));
+var modisPercNoVeg = take_date_off_front_put_at_back(modisVCF.select('Percent_NonVegetated').toBands().updateMask(mask));
+var modisTreeSD = take_date_off_front_put_at_back(modisVCF.select('Percent_Tree_Cover_SD').toBands().updateMask(mask));
+var modisNoVegSD = take_date_off_front_put_at_back(modisVCF.select('Percent_NonVegetated_SD').toBands().updateMask(mask));
+var modisQual = take_date_off_front_put_at_back(modisVCF.select('Quality').toBands().updateMask(mask));
+var modisCloud = take_date_off_front_put_at_back(modisVCF.select('Cloud').toBands().updateMask(mask));
+print("modisPercTreeCov:", modisPercTreeCov);
+
+
+//GAP conus cover 2011 data and landfire environmental site potential
+gapConusCover = gapConusCover.updateMask(mask);
+landfireBPS = landfireBPS.filter(ee.Filter.eq('system:index', 'CONUS')).toBands().updateMask(mask);
+
+
+/////////////// Get Drought/Climate & mask //////////////////
+
+print("Drought data:", drought);
+
+//Select drought variables of interest
+var drought_vars = ee.List(['pdsi', 'spei30d', 'spei1y', 'spei5y']);
+
+drought = drought.filterDate(startDate, endDate).select(drought_vars);
+
+//Function to pull data from one year, average, and reset image properties/band names
+//Needs to be mapped over a list of years
+//Mapped function needs input of 1) the IC of interest, and 2) string that is the variable name of interest
+var annualize = function(ic, variable){
+  var wrap = function(yr){
+    var yrNm = ee.Number(yr).format('%04d');
+    var means = ic.select(variable).filter(ee.Filter.calendarRange(yr,yr,'year')).mean();
+    var name = ee.String(variable).cat("_").cat(yrNm).cat('_annual_mean');
+    return means.rename(name);
+  };
+  return wrap;
+};
+
+//Function to remove annoying band system index number from beginning of band names
+var remove_toBands_index = function(im) {
+  var ogNames = im.bandNames();
+  
+  var string_manip = function(str) {
+    str = ee.String(str);
+    var indexBreak = str.index('_');
+    return str.slice(indexBreak.add(1));
+  };
+  
+  var newNames = ogNames.map(string_manip);
+  
+  return im.rename(newNames);
+};
+
+//For each year of interest, get an annual average of the variable. Turn these year averages into bands in an image, mask it, and fix the band names
+var pdsiAnnual = remove_toBands_index(ee.ImageCollection.fromImages(years.map(annualize(drought, 'pdsi'))).toBands().updateMask(mask));
+var spei30dAnnual = remove_toBands_index(ee.ImageCollection.fromImages(years.map(annualize(drought, 'spei30d'))).toBands().updateMask(mask));
+var spei1yAnnual = remove_toBands_index(ee.ImageCollection.fromImages(years.map(annualize(drought, 'spei1y'))).toBands().updateMask(mask));
+var spei5yAnnual = remove_toBands_index(ee.ImageCollection.fromImages(years.map(annualize(drought, 'spei5y'))).toBands().updateMask(mask));
+print('SPEI 1yr Annual', spei1yAnnual);
+
+
+
+
+///////////////////ADD HUMAN READABLE TO FILE NAMES ////////////////////
+
+///////////////////// EXPORT DATA ////////////////////
+var projectionReadable = ee.String(projection).slice(0,4).cat('_').cat(ee.String(projection).slice(5));
+
+//Export the data to google drive with human readable names
+Export.image.toDrive({
+  image: dem,
+  description: ee.String('USGS_SRTM_30m').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: slope,
+  description: ee.String('USGS_SRTM_30m_slope').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: aspect,
+  description: ee.String('USGS_SRTM_30m_aspect').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: hillshade,
+  description: ee.String('USGS_SRTM_30m_hillshade').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: landcover,
+  description: ee.String('NLCD_landcover').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: gapConusCover,
+  description: ee.String('GapConusCover2011').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: landfireBPS,
+  description: ee.String('LandfireBPS').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 30,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisPercTreeCov,
+  description: ee.String('Modis_Percent_Tree_Cover').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisPercNonTreeVeg,
+  description: ee.String('Modis_Percent_NonTree_Vegetation').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisPercNoVeg,
+  description: ee.String('Modis_Percent_NonVegetated').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisTreeSD,
+  description: ee.String('Modis_Percent_Tree_Cover_SD').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisNoVegSD,
+  description: ee.String('Modis_Percent_NonVegetated_SD').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisQual,
+  description: ee.String('Modis_Quality').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: modisCloud,
+  description: ee.String('Modis_Cloud').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 250,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: pdsiAnnual,
+  description: ee.String('pdsi_Annual').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 4638.3,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: spei30dAnnual,
+  description: ee.String('spei30d_Annual').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 4638.3,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: spei1yAnnual,
+  description: ee.String('spei1y_Annual').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 4638.3,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+Export.image.toDrive({
+  image: spei5yAnnual,
+  description: ee.String('spei5y_Annual').cat('_').cat(regionReadable).cat('_').cat(projectionReadable).getInfo(),
+  crs: projection,
+  scale: 4638.3,
+  region: aoi,
+  folder: folderName,
+  maxPixels: 1e10
+});
+
+
