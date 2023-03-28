@@ -4,6 +4,8 @@
 #This script takes in data from GEE and elsewhere and preps it
 #for the linked disturbance project
 
+#Prior script: wrangle_data_GEE.js
+
 #This script uses the following naming conventions wherever possible:
 # lowerCamelCase for variables
 # period.separated for functions
@@ -40,7 +42,24 @@ names(sRockiesHLImasked) <- "heatLoadIndex"
 
 #Add to data & export
 topo_SRockies <- c(topo_SRockies,sRockiesHLImasked) #combine
-writeRaster(topo_SRockies, here("data", "topography_southern_rockies.tif"))
+writeRaster(topo_SRockies,
+            here("data", "topography_southern_rockies.tif"),
+            overwrite = TRUE,
+            datatype = 'FLT4S') #ALWAYS specify datatype when writing a raster to file. Default is FLT4S
+
+#########################################################################
+#######Load climate normals data, write as single tif
+##########################################################################
+
+aet <- terra::rast("data/Climate_Normals-20230317T210403Z-001/Climate_Normals/aet_1981_2010_mean_clip_SRockies.tif")
+def <- terra::rast("data/Climate_Normals-20230317T210403Z-001/Climate_Normals/def_1981_2010_mean_clip_SRockies.tif")
+climateNormals <- c(aet,def) %>%
+  terra::project(crs(topo_SRockies))
+
+writeRaster(climateNormals,
+            here("data", "climate_normals_aet_def.tif"),
+            overwrite = TRUE,
+            datatype = 'FLT4S')
 
 
 #####################################################
@@ -51,7 +70,10 @@ nlcdFileNames <- list.files(here("data"),
                             pattern = "NLCD*", full.names = TRUE)
 nlcdCollection <- sprc(nlcdFileNames) #Create as SpatRasterCollection since they aren't of the same area
 nlcd <- mosaic(nlcdCollection) #Mosaic the SpatRasterCollection
-writeRaster(nlcd, here("data", "nlcd_southern_rockies.tif"))
+writeRaster(nlcd,
+            here("data", "nlcd_southern_rockies.tif"),
+            overwrite = TRUE,
+            datatype = 'INT1U')
 
 
 ###Create simple modal forest type dataset & forest mask
@@ -87,5 +109,11 @@ forestNonForest <- forestType %>% classify(forestClassifier2, right = NA)
 plot(forestNonForest)
 
 #Write modal forest type and forest mask
-writeRaster(forestType, here("data", "modal_forest_type.tif"))
-writeRaster(forestNonForest, here("data", "forest_mask.tif"))
+writeRaster(forestType,
+            here("data", "modal_forest_type_nlcd_srockies.tif"),
+            overwrite = TRUE,
+            datatype = "INT1U")
+writeRaster(forestNonForest,
+            here("data", "forest_mask_nlcd_srockies.tif"),
+            overwrite = TRUE,
+            datatype = "INT1U")
