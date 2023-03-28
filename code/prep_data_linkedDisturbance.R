@@ -27,23 +27,34 @@ options(digits = 10) #Set standard decimal print output
 #AOI shapefile
 aoiShp <- st_read("data/aoi/EPA_lvl3_SRockies_epsg32613.shp")
 
+#Set output directory & create if doesn't already exist
+outDir <- here("data", "derived")
+
+# check if sub directory exists 
+if (!dir.exists(outDir)){
+  dir.create(here("data", "derived"))
+}
+
+#Also set data directories
+sharedData <- here("data", "shared")
+rawData <- here("data", "raw_GEE")
 
 #########################################################################
 #######Load topography data, add heat load index, and write as single tif
 ##########################################################################
 
-topoFileNames <- list.files(here("data"), pattern = "USGS_SRTM*", full.names=TRUE)
-topo_SRockies <- rast(topoFileNames)
+topoFileNames <- list.files(rawData, pattern = "USGS_SRTM*", full.names=TRUE)
+topo_SRockies <- terra::rast(topoFileNames)
 
 #Calculate HLI, mask, rename
-sRockiesHLI <- hli(topo_SRockies$elevation) #Calculate HLI
-sRockiesHLImasked <- mask(sRockiesHLI, aoiShp) #Mask to aoi
+sRockiesHLI <- spatialEco::hli(topo_SRockies$elevation) #Calculate HLI
+sRockiesHLImasked <- terra::mask(sRockiesHLI, aoiShp) #Mask to aoi
 names(sRockiesHLImasked) <- "heatLoadIndex"
 
 #Add to data & export
-topo_SRockies <- c(topo_SRockies,sRockiesHLImasked) #combine
-writeRaster(topo_SRockies,
-            here("data", "topography_southern_rockies.tif"),
+topo_SRockies <- terra::c(topo_SRockies,sRockiesHLImasked) #combine
+terra::writeRaster(topo_SRockies,
+            here(outDir, "topography_southern_rockies.tif"),
             overwrite = TRUE,
             datatype = 'FLT4S') #ALWAYS specify datatype when writing a raster to file. Default is FLT4S
 
@@ -51,13 +62,13 @@ writeRaster(topo_SRockies,
 #######Load climate normals data, write as single tif
 ##########################################################################
 
-aet <- terra::rast("data/Climate_Normals-20230317T210403Z-001/Climate_Normals/aet_1981_2010_mean_clip_SRockies.tif")
-def <- terra::rast("data/Climate_Normals-20230317T210403Z-001/Climate_Normals/def_1981_2010_mean_clip_SRockies.tif")
+aet <- terra::rast(here(sharedData, "Climate_Normals-20230317T210403Z-001/Climate_Normals/aet_1981_2010_mean_clip_SRockies.tif"))
+def <- terra::rast(here(sharedData, "Climate_Normals-20230317T210403Z-001/Climate_Normals/def_1981_2010_mean_clip_SRockies.tif"))
 climateNormals <- c(aet,def) %>%
   terra::project(crs(topo_SRockies))
 
-writeRaster(climateNormals,
-            here("data", "climate_normals_aet_def.tif"),
+terra::writeRaster(climateNormals,
+            here(outDir, "climate_normals_aet_def.tif"),
             overwrite = TRUE,
             datatype = 'FLT4S')
 
@@ -66,12 +77,12 @@ writeRaster(climateNormals,
 #########Load nlcd and create forest masks
 ######################################################
 
-nlcdFileNames <- list.files(here("data"),
+nlcdFileNames <- list.files(rawData,
                             pattern = "NLCD*", full.names = TRUE)
 nlcdCollection <- sprc(nlcdFileNames) #Create as SpatRasterCollection since they aren't of the same area
-nlcd <- mosaic(nlcdCollection) #Mosaic the SpatRasterCollection
-writeRaster(nlcd,
-            here("data", "nlcd_southern_rockies.tif"),
+nlcd <- terra::mosaic(nlcdCollection) #Mosaic the SpatRasterCollection
+terra::writeRaster(nlcd,
+            here(outDir, "nlcd_southern_rockies.tif"),
             overwrite = TRUE,
             datatype = 'INT1U')
 
@@ -85,7 +96,7 @@ forestClassifier <- matrix(m, ncol=3, byrow=TRUE)
 
 #Run classifier over all years of NLCD
 forestType <- nlcd %>% lapply(function(yr) {
-  classed <- classify(yr,
+  classed <- terra::classify(yr,
                       forestClassifier,
                       right = NA)
   print("layer done")
@@ -104,16 +115,16 @@ plot(forestType)
 #Classify to forest/non-forest mask
 m <- c(41, 43, 1) #forest -> binary forest/non-forest
 forestClassifier2 <- matrix(m, ncol=3, byrow=TRUE)
-forestNonForest <- forestType %>% classify(forestClassifier2, right = NA)
+forestNonForest <- forestType %>% terra::classify(forestClassifier2, right = NA)
 
 plot(forestNonForest)
 
 #Write modal forest type and forest mask
-writeRaster(forestType,
-            here("data", "modal_forest_type_nlcd_srockies.tif"),
+terra::writeRaster(forestType,
+            here(outDir, "modal_forest_type_nlcd_srockies.tif"),
             overwrite = TRUE,
             datatype = "INT1U")
-writeRaster(forestNonForest,
-            here("data", "forest_mask_nlcd_srockies.tif"),
+terra::writeRaster(forestNonForest,
+            here(outDir, "forest_mask_nlcd_srockies.tif"),
             overwrite = TRUE,
             datatype = "INT1U")
