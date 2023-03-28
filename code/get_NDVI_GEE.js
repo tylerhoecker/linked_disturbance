@@ -23,7 +23,9 @@
 // an aoi chosen from epa_lvl3 (EPA Ecoregions at the level 3 category)
 // OUTPUTS:
 // .tif files of standard data exported for further analysis
-
+var epa_lvl3 = ee.FeatureCollection("users/tymc5571/EPA_EcoLvl3"),
+    landsatSurfaceRef = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2");
+    
 ////////////////////////////////// USER-SET PARAMETERS /////////////////////////////////////
 
 //Google Drive folder for outputs
