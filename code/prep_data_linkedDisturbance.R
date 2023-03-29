@@ -15,7 +15,7 @@
 library(terra) #New raster package
 library(sf) #New vector package
 library(here) #Best practice for relative paths
-library(spatialEco) #spatial ecology package for calculating Heat Load Index (HLI)
+library(spatialEco) #spatial ecology package for calculating McCune & Keon Heat Load Index (HLI)
 library(future.apply) #parallelize apply functions
 
 #####Clean workspace

@@ -3,11 +3,14 @@
 #Create modeling dataframe for linked disturbance biomass modeling
 #Tyler L. McIntosh
 #CU Boulder CIRES Earth Lab
-#3/28/23
+#Last updated: 3/29/23
 
 # This script prepares a dataframe for modeling of biomass.
 # It takes in a variety of datasets, samples them, and
 # creates a single joined dataframe
+
+# The script is set up to work for GEDI collection dates from 2019 - 2021.
+# Any other collection dates will break the script
 
 # Prior script: prep_data_linkedDisturbance.R & simplify_disturbance_stack.R
 
@@ -96,7 +99,7 @@ climNorm <- terra::rast(here(derivedData, "climate_normals_aet_def.tif"))
 datatype(climNorm)
 
 #SPEI data
-spei <- terra::rast(here(rawData, "spei1y_Annual_SouthernRockies_EPSG_32613.tif"))
+spei <- terra::rast(here(rawData, "spei1y_Annual_SouthernRockies_EPSG_32613_GEE.tif"))
 
 #Modis
 modisNonVeg <- terra::rast(here(rawData, "Modis_Percent_NonVegetated_SouthernRockies_EPSG_32613.tif"))
@@ -113,7 +116,11 @@ gedi <- sf::st_read(here(sharedData, "GEDI_4A_Hayman.geojson")) %>% sf::st_trans
 mapview(gedi)
 
 #NDVI
-ndvi <- terra::rast(here(rawData, "greenestNDVI_LandsatDerived_SouthernRockies_2020-05-01_2020-09-30_EPSG_32613_GEE.tif"))
+ndviFileNms <- list.files(here(rawData),
+                          pattern = "greenestNDVI*",
+                          full.names = TRUE)
+ndvi <- terra::rast(ndviFileNms)
+names(ndvi) <- c("NDVI2019", "NDVI2020", "NDVI2021")
 
 ### ### ### ### ### ### ### ### ### ### ### ###
 
@@ -157,43 +164,30 @@ if(parallel == TRUE) {
 }
 
 
-## Add raw lat/long to gedi data points ----
+## Add basic gedi data ----
+
+#Raw lat/long
 #from https://stackoverflow.com/questions/54734771/sf-write-lat-long-from-geometry-into-separate-column-and-keep-id-column
 gedi <- gedi %>%
-  mutate(long = unlist(map(gedi$geometry, 1)),
-         lat = unlist(map(gedi$geometry, 2)))
+  mutate(utm_z13n_easting = unlist(map(gedi$geometry, 1)),
+         utm_z13n_northing = unlist(map(gedi$geometry, 2)))
 
+#Also rename original lat/long
+gedi <- gedi %>%
+  rename(latEPSG4326 = lat_lowestmode,
+         longEPSG4326 = lon_lowestmode)
 
+#Add collection date
+###########################################
+#FIX THIS TO BE CORRECT -- THIS IS JUST CREATING FAKE DATA RIGHT NOW
+###########################################
+gedi <- gedi %>%
+  mutate(gediYear = case_when(round(utm_z13n_easting, 0) %% 2 == 0 ~ 2020,
+                              round(utm_z13n_easting, 0) %% 2 != 0 ~ 2019))
+
+gediYr <- setNames(gedi$gediYear, "gediYear")
 
 # Wrangle simple data & extract ----
-
-# Modis
-modis2020 <- c(modisNonVeg$Percent_NonVegetated_2020_03_05,
-               modisNonTree$Percent_NonTree_Vegetation_2020_03_05,
-               modisTree$Percent_Tree_Cover_2020_03_05)
-
-modisD <- modis2020 %>%
-  terra::extract(gedi) %>%
-  setNames(c("id", "modis2020nonVeg", "modis2020nonTreeVeg", "modis2020TreeVeg")) %>%
-  select(-"id")
-
-# Climate
-clim1 <- climNorm %>%
-  terra::extract(gedi) %>%
-  setNames(c("id", "aetNorm", "defNorm")) %>%
-  select(-"id")
-
-clim2 <- spei %>%
-  terra::extract(gedi) %>%
-  select(-"ID")
-
-climateD <- cbind(clim1, clim2)
-
-# NDVI
-ndviD <- ndvi %>%
-  terra::extract(gedi) %>%
-  select(-"ID") %>%
-  setNames("peakNDVI2020")
 
 # DEM
 demD <- demDats %>%
@@ -218,6 +212,82 @@ forest2 <- forestModal %>%
 
 forestD <- cbind(forest1, forest2)
 
+# Wrangle Climate, Modis, & NDVI data ----
+
+
+## Modis ----
+modis <- c(modisNonVeg$Percent_NonVegetated_2019_03_06,
+           modisNonTree$Percent_NonTree_Vegetation_2019_03_06,
+           modisTree$Percent_Tree_Cover_2019_03_06,
+           modisNonVeg$Percent_NonVegetated_2020_03_05,
+           modisNonTree$Percent_NonTree_Vegetation_2020_03_05,
+           modisTree$Percent_Tree_Cover_2020_03_05)
+
+modisD <- modis %>%
+  terra::extract(gedi)%>%
+  select(-"ID") %>%
+  cbind(gediYr) %>%
+  mutate(modisNonVeg = case_when(gediYr == 2021 ~ NA,
+                                 gediYr == 2020 ~ Percent_NonVegetated_2020_03_05,
+                                 gediYr == 2019 ~ Percent_NonVegetated_2019_03_06)) %>%
+  mutate(modisNonTreeVeg = case_when(gediYr == 2021 ~ NA,
+                                 gediYr == 2020 ~ Percent_NonTree_Vegetation_2020_03_05,
+                                 gediYr == 2019 ~ Percent_NonTree_Vegetation_2019_03_06)) %>%
+  mutate(modisTreeVeg = case_when(gediYr == 2021 ~ NA,
+                                 gediYr == 2020 ~ Percent_Tree_Cover_2020_03_05,
+                                 gediYr == 2019 ~ Percent_Tree_Cover_2019_03_06)) %>%
+  select(modisNonVeg, modisNonTreeVeg, modisTreeVeg)
+
+
+## Climate ----
+climNormD <- climNorm %>%
+  terra::extract(gedi) %>%
+  setNames(c("id", "aetNorm", "defNorm")) %>%
+  select(-"id")
+
+
+#Function to get spei values for years prior to GEDI collection
+#Takes in a dataframe with values for SPEI from 2020 to 1999 as columns, + a gedi collection year (gediYr)
+spei_in_x_yr_prior <- function(dats, x) {
+  colNm <- paste("spei", x, "YrPrior", sep = '')
+  dats <- dats %>% transmute({{colNm}} := case_when(gediYr == 2021 ~ .[[x]],
+                                                    gediYr == 2020 ~ case_when(1+x > 22 ~ NA, #out of timeframe, return NA
+                                                                               TRUE ~ .[[x+1]]),
+                                                    gediYr == 2019 ~ case_when(2+x > 22 ~ NA, #out of timeframe, return NA
+                                                                               TRUE <= 22 ~ .[[min(x+2, ncol(.))]])))
+  return(dats)
+}
+
+
+#Function to run spei_in_x_yr_prior for all 22 years, then bind together and return
+spei_in_x_yr_prior_full <- function(dats) {
+  d <- spei_in_x_yr_prior(dats = dats, x = 1)
+  for (i in 2:(ncol(dats)-1)) {
+    d <- cbind(d, spei_in_x_yr_prior(dats = dats, x = i))
+  }
+  return(d)
+}
+
+#Run on SPEI
+climSPEID <- spei %>%
+  terra::extract(gedi) %>%
+  select(-"ID") %>%
+  rev() %>%
+  cbind(gediYr) %>%
+  spei_in_x_yr_prior_full()
+
+climateD <- cbind(climNormD, climSPEID)
+
+## NDVI ----
+ndviD <- ndvi %>%
+  terra::extract(gedi) %>%
+  select(-"ID") %>%
+  cbind(gediYr) %>%
+  mutate(peakNDVI = case_when(gediYr == 2021 ~ NDVI2021,
+                              gediYr == 2020 ~ NDVI2020,
+                              gediYr == 2019 ~ NDVI2019)) %>%
+  select(peakNDVI)
+
 
 # Wrangle disturbance stack ----
 
@@ -240,7 +310,8 @@ fire <- distD %>%
                                  .==2 ~ 0,
                                  .==3 ~ 0,
                                  .==4 ~ 1,
-                                 .==5 ~ 0)))
+                                 .==5 ~ 0))) %>%
+  cbind(gediYr)
 
 hotDrought <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
@@ -248,7 +319,8 @@ hotDrought <- distD %>%
                                  .==2 ~ 0,
                                  .==3 ~ 1,
                                  .==4 ~ 1,
-                                 .==5 ~ 0)))
+                                 .==5 ~ 0))) %>%
+  cbind(gediYr)
 
 insect <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
@@ -256,7 +328,8 @@ insect <- distD %>%
                                  .==2 ~ 1,
                                  .==3 ~ 0,
                                  .==4 ~ 0,
-                                 .==5 ~ 1)))
+                                 .==5 ~ 1))) %>%
+  cbind(gediYr)
 
 anyCombo <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
@@ -264,45 +337,55 @@ anyCombo <- distD %>%
                                  .==2 ~ 0,
                                  .==3 ~ 0,
                                  .==4 ~ 1,
-                                 .==5 ~ 1)))
+                                 .==5 ~ 1))) %>%
+  cbind(gediYr)
 
-#Function to create a column of data with number of years since the disturbance has been present
-#Dats is a dataframe with years as columns, descending
+
+#Function to create two columns of data:
+#####number of years since the disturbance has been present (not including gedi collection year), and
+#####if disturbance was present in gedi collection year (binary)
+#Dats is a dataframe with years as columns, descending. gediYr should the last column
 #distNm is the name of the disturbance represented in the dataset. Should be CAPITALIZED
 time_since_last <- function(dats, distNm) {
-  colNm <- paste("yrsSince", distNm, sep = '')
-  #Use 99 as entry when there are no cases of the disturbance in the stack
-  #Otherwise, calculate years since
-  dats <- dats %>% transmute({{colNm}} := case_when(rowSums(across(1:ncol(dats)))==0 ~ 99,
-                                                     rowSums(across(1:ncol(dats)))!=0 ~ max.col(dats, ties.method = "first") - 1))
-  return(dats)
+  colNm1 <- paste("yrsSince", distNm, sep = '')
+  colNm2 <- paste("collectionYr", distNm, sep = "")
+  #Use NA as entry when there are no cases of the disturbance in the stack prior to gedi collection date
+  #Otherwise, calculate years since, NOT including year of data collection
+  yrsS <- dats %>% transmute({{colNm1}} := case_when(gediYr == 2021 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
+                                                                               rowSums(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`))!=0 ~ 
+                                                                                 max.col(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`), ties.method = "first")),
+                                                    gediYr == 2020 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
+                                                                               rowSums(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`))!=0 ~ 
+                                                                                 max.col(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`), ties.method = "first")),
+                                                    gediYr == 2019 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
+                                                                               rowSums(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`))!=0 ~ 
+                                                                                 max.col(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`), ties.method = "first"))))
+  #calculate collection year disturbance binary
+  cYD <- dats %>% transmute({{colNm2}} := case_when(gediYr == 2021 ~ NA,
+                                                    gediYr == 2020 ~ `forest-disturbance-s-rockies-2020`,
+                                                    gediYr == 2019 ~ `forest-disturbance-s-rockies-2019`))
+  return(cbind(yrsS, cYD))
 }
 
-#Function to create a column of data with number of years a disturbance has been present in last X years
-#Dats is a dataframe with years as columns, descending
+#Function to create a column of data with number of years a disturbance has been present in the prior X years
+#Dats is a dataframe with years as columns, descending. gediYr should be the last column, designating gedi collection year
 #distNm is the name of the disturbance represented in the dataset. Should be LOWERCASE
 #xYrs is the number of years since the first column to consider
-years_in_last <- function(dats, distNm, xYrs) {
-  colNm <- paste(distNm, "YrsInLast", xYrs, sep = '')
-  dats <- dats %>% transmute({{colNm}} := rowSums(across(1:xYrs)))
+years_in_prior <- function(dats, distNm, xYrs) {
+  colNm <- paste(distNm, "YrsInPrior", xYrs, sep = '')
+  dats <- dats %>% transmute({{colNm}} := case_when(gediYr == 2021 ~ rowSums(across(1:(xYrs))),
+                                                    gediYr == 2020 ~ case_when(1+xYrs > 22 ~ NA, #out of timeframe
+                                                                               TRUE ~ rowSums(across(2:(1+xYrs)))),
+                                                    gediYr == 2019 ~ case_when(2+xYrs > 22 ~ NA, #out of timeframe
+                                                                               TRUE <= 22 ~ rowSums(across(3:min(2+xYrs, ncol(.)))))))
   return(dats)
 }
 
-#Function to run years_in_last for 5, 10, 15, and 20 years, then bind together and return
-#DEPRECATED & UNSUSED
-all_years_in_last_binned <- function(dats, distNm) {
-  d <- cbind(years_in_last(dats = dats, distNm = distNm, xYrs = 5),
-             years_in_last(dats = dats, distNm = distNm, xYrs = 10),
-             years_in_last(dats = dats, distNm = distNm, xYrs = 15),
-             years_in_last(dats = dats, distNm = distNm, xYrs = 20))
-  return(d)
-}
-
-#Function to run years_in_last for all 22 years, then bind together and return
-all_years_in_last_full <- function(dats, distNm) {
-  d <- years_in_last(dats = dats, distNm = distNm, xYrs = 1)
-  for (i in 2:ncol(dats)) {
-    d <- cbind(d, years_in_last(dats = dats, distNm = distNm, xYrs = i))
+#Function to run years_in_prior for all 22 years, then bind together and return
+all_years_in_prior_full <- function(dats, distNm) {
+  d <- years_in_prior(dats = dats, distNm = distNm, xYrs = 1)
+  for (i in 2:(ncol(dats)-1)) {
+    d <- cbind(d, years_in_prior(dats = dats, distNm = distNm, xYrs = i))
   }
   return(d)
 }
@@ -310,32 +393,73 @@ all_years_in_last_full <- function(dats, distNm) {
 ## Run functions on all data types ----
 
 fireD <- time_since_last(fire, "Fire") %>%
-  cbind(all_years_in_last_full(fire, "fire"))
+  cbind(all_years_in_prior_full(fire, "fire"))
 hotD <- time_since_last(hotDrought, "HotDrought") %>%
-  cbind(all_years_in_last_full(hotDrought, "hotDrought"))
+  cbind(all_years_in_prior_full(hotDrought, "hotDrought"))
 insectD <- time_since_last(insect, "Insect") %>%
-  cbind(all_years_in_last_full(insect, "insect"))
+  cbind(all_years_in_prior_full(insect, "insect"))
 comboD <- time_since_last(anyCombo, "Combo") %>%
-  cbind(all_years_in_last_full(anyCombo, "combo"))
-
+  cbind(all_years_in_prior_full(anyCombo, "combo"))
 
 #Bind together disturbance data
 distD <- cbind(hotD, fireD, insectD, comboD)
 
 
-# Bind together all data, remove non-forest, and export ----
+# Bind together all data, filter, and export ----
 
 df <- gedi %>%
   cbind(modisD) %>%
-  cbind(climateD) %>%
   cbind(ndviD) %>%
   cbind(demD) %>%
   cbind(forestD) %>%
+  cbind(climateD) %>%
   cbind(distD)
 
-df <- df %>% filter(forestMask == 1)
+## Filter data ----
+
+df <- df %>%
+  filter(forestMask == 1) %>% #Forest-only
+  filter(collectionYrFire == 0) %>% #Remove data points where a fire or insect disturbance occurred in the collection year
+  filter(collectionYrInsect == 0)
+
 
 write.csv(df, here(outDir, "baby_data_frame.csv"))
+
+#Create metadata
+columns <- c(colnames(df)[1:19],
+             "spei...",
+             "yrsSince...",
+             "collectionYr...",
+             "...YrsInPriorX",
+             "...combo...")
+description <- c("Latitude in EPSG4326",
+                 "Longitude in EPSG4326",
+                 "Aboveground Biomass from GEDI 4A product",
+                 "UTM Z 13N Northing",
+                 "UTM Z 13N Easting",
+                 "Year of GEDI data collection",
+                 "Modis non vegetated % cover in year of GEDI data collection, NA indicates data unavailable",
+                 "Modis non-tree vegetated % cover in year of GEDI data collection, NA indicates data unavailable",
+                 "Modis tree % cover in year of GEDI data collection, NA indicates data unavailable",
+                 "Peak NDVI in year of GEDI data collection, derived from Landsat",
+                 "Topographic aspect derived from USGS SRTM 30m DEM",
+                 "Topographic slope derived from USGS SRTM 30m DEM",
+                 "Topographic elevation from USGS SRTM 30m DEM",
+                 "McCune & Keon Heat Load Index (HLI) from USGS SRTM 30m DEM",
+                 "Forest mask, binary: pixels with any type of forested cover at any point in NLCD dataset",
+                 "Forest code: NLCD codes of modal forest cover for pixel",
+                 "Forest type: NLCD human-readable forest cover type associated with code",
+                 "30-yr average of AET from TopoFire, Holden et al.",
+                 "30-yr average of CWD from TopoFire, Holden et al.",
+                 "Standardized Precipitaion Evapotranspiration Index (SPEI) with climatic water balance aggregated over the year prior to a given date. Averaged for each calendar year and provided for each year X years prior to GEDI data collection. NA indicates out of data timeframe",
+                 "Number of years since an event of the given disturbance type, exclusive of GEDI collection year. NA indicates disturbance was never present in available data",
+                 "Presence of given disturbance in year of GEDI collection, binary",
+                 "Number of years of given disturbance in the X years prior to GEDI data collection. NA indicates that X is beyond the time frame of the available data",
+                 "'Combo' indicates a combined disturbance of either hotterDrought & insects or hotterDrought & fire occurring in the same year")
+df_metadata <- cbind(columns, description)
+
+write.csv(df, here(outDir, "metadata.csv"))
+
 
 if(parallel == TRUE) {
   stopImplicitCluster()
