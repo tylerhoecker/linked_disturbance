@@ -25,7 +25,7 @@
 ## Libraries ----
 
 #Check the required libraries and download if needed
-list.of.packages <- c("tidyverse","beepr", "terra", "sf", "mapview", "here", "tictoc")
+list.of.packages <- c("tidyverse","beepr", "terra", "sf", "mapview", "here", "tictoc", "doParallel", "zip")
 new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
 if(length(new.packages)) install.packages(new.packages)
 
@@ -43,6 +43,7 @@ library(doParallel) #Package for multi-threaded computation in R
   #NOTE: Only use parallel processing (eg foreach %dopar% call) for operations that take a long time!
   #parallelized operations on Windows (i.e. w/o forking) must have packages & functions fed to %dopar% using 
   #.export for functions and .packages for packages
+library(zip) #For zipping files (does not require external tools). mode = "cherry-pick" to select specific files w/o mirroring directory structure
 
 ## Clean workspace & set up environment ----
 rm(list=ls()) #Ensure empty workspace if running from beginning
@@ -54,7 +55,7 @@ options(scipen = 999) #Turn scientific notation on and off (0 = on, 999 = off)
 options(error = beep) #activate beep on error
 
 parallel = FALSE #Change to "True" to enable parallel computing at geographic difference choke point
-
+dfName = "baby_data_frame"
 
 #Set up parallel computing
 if(parallel == TRUE) {
@@ -422,8 +423,8 @@ df <- df %>%
   filter(collectionYrFire == 0) %>% #Remove data points where a fire or insect disturbance occurred in the collection year
   filter(collectionYrInsect == 0)
 
-
-write.csv(df, here(outDir, "baby_data_frame.csv"))
+dfFile <- paste(dfName, ".csv", sep="")
+write.csv(df, here(outDir, dfFile))
 
 #Create metadata
 columns <- c(colnames(df)[1:19],
@@ -457,10 +458,34 @@ description <- c("Latitude in EPSG4326",
                  "Number of years of given disturbance in the X years prior to GEDI data collection. NA indicates that X is beyond the time frame of the available data",
                  "'Combo' indicates a combined disturbance of either hotterDrought & insects or hotterDrought & fire occurring in the same year")
 df_metadata <- cbind(columns, description)
+stamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 
-write.csv(df, here(outDir, "metadata.csv"))
+#Sink to text file
+sink(here(outDir, "metadata.txt"))
+cat("This dataset includes GEDI points from 2019-2021 that are over forested areas of the Southern Rockies. \n")
+cat("Data points within a buffer of Census Bureau road polylines have been removed. \n")
+cat("Data points that had a fire or insect disturbance in the year of GEDI data collection have been removed. \n")
+cat("Disturbance data is from the disturbance stack derived by CU Boulder's CIRES Earth Lab in 2023. \n")
+cat("\n")
+cat("Author: Tyler L. McIntosh \n")
+cat("Date generated: ", stamp, "\n")
+cat("GitHub repo with code for reproduction: https://github.com/tylerhoecker/linked_disturbance")
+cat("\n")
+cat("\n")
+cat(paste0(colnames(df_metadata), collapse = ' :: '), sep = "\n")
+cat("\n")
+cat(apply(df_metadata,1,paste0, collapse=' :: '), sep = "\n")
+sink()
 
+#Zip together
+zip::zip(zipfile = here(outDir, "linked_disturbance_southern_rockies_data_frame.zip"),
+    files = c(here(outDir, dfFile),
+              here(outDir, "metadata.txt")),
+    mode = "cherry-pick")
 
+#Stop cluster if on
 if(parallel == TRUE) {
   stopImplicitCluster()
 }
+
+
