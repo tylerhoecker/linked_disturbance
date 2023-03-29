@@ -16,6 +16,7 @@ library(terra) #New raster package
 library(sf) #New vector package
 library(here) #Best practice for relative paths
 library(spatialEco) #spatial ecology package for calculating Heat Load Index (HLI)
+library(future.apply) #parallelize apply functions
 
 #####Clean workspace
 rm(list=ls()) #Ensure empty workspace
@@ -86,20 +87,18 @@ terra::writeRaster(nlcd,
             overwrite = TRUE,
             datatype = 'INT1U')
 
-
 ###Create simple modal forest type dataset & forest mask
 
 #Create classifier - 41, 42, and 43 are the classes of interest (forest)
 m <- c(0, 40, NA,
-       44, 100, NA) #change non-forested classes to NA
+       44, 100, NA) #change non-forested classes to 0
 forestClassifier <- matrix(m, ncol=3, byrow=TRUE)
 
 #Run classifier over all years of NLCD
-forestType <- nlcd %>% lapply(function(yr) {
+forestType <- nlcd %>% future_lapply(function(yr) {
   classed <- terra::classify(yr,
                       forestClassifier,
                       right = NA)
-  print("layer done")
   return(classed)
 })
 
@@ -110,6 +109,12 @@ forestType <- terra::rast(forestType)
 #Compute modal forest type raster
 #na.rm=TRUE to not include NAs. (i.e. include anything that was a forest in any layer)
 forestType <- terra::modal(forestType, na.rm=TRUE)
+
+#now re-classify to turn remaining NAs into 0s
+m <- matrix(c(NA, 0),
+            ncol = 2, byrow=TRUE)
+forestType <- forestType %>% terra::classify(m)
+
 plot(forestType)
 
 #Classify to forest/non-forest mask
@@ -128,3 +133,4 @@ terra::writeRaster(forestNonForest,
             here(outDir, "forest_mask_nlcd_srockies.tif"),
             overwrite = TRUE,
             datatype = "INT1U")
+
