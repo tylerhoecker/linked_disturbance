@@ -3,7 +3,7 @@
 #Create modeling dataframe for linked disturbance biomass modeling
 #Tyler L. McIntosh
 #CU Boulder CIRES Earth Lab
-#Last updated: 3/29/23
+#Last updated: 3/30/23
 
 # This script prepares a dataframe for modeling of biomass.
 # It takes in a variety of datasets, samples them, and
@@ -55,7 +55,7 @@ options(scipen = 999) #Turn scientific notation on and off (0 = on, 999 = off)
 options(error = beep) #activate beep on error
 
 parallel = FALSE #Change to "True" to enable parallel computing at geographic difference choke point
-dfName = "baby_data_frame"
+dfName = "linked_disturbance_baby_data_frame" #NAME OF OUTPUT DF
 
 #Set up parallel computing
 if(parallel == TRUE) {
@@ -68,7 +68,7 @@ if(parallel == TRUE) {
 ## Set relative directories structure ----
 
 # Set output directory & create if doesn't already exist
-outDir <- here("data", "derived")
+outDir <- here("data", "final")
 if (!dir.exists(outDir)){
   dir.create(outDir)
 }
@@ -423,10 +423,8 @@ df <- df %>%
   filter(collectionYrFire == 0) %>% #Remove data points where a fire or insect disturbance occurred in the collection year
   filter(collectionYrInsect == 0)
 
-dfFile <- paste(dfName, ".csv", sep="")
-write.csv(df, here(outDir, dfFile))
 
-#Create metadata
+## Create metadata ----
 columns <- c(colnames(df)[1:19],
              "spei...",
              "yrsSince...",
@@ -458,31 +456,47 @@ description <- c("Latitude in EPSG4326",
                  "Number of years of given disturbance in the X years prior to GEDI data collection. NA indicates that X is beyond the time frame of the available data",
                  "'Combo' indicates a combined disturbance of either hotterDrought & insects or hotterDrought & fire occurring in the same year")
 df_metadata <- cbind(columns, description)
+
+
+## Write & zip Data & Metadata files ----
+
+#Write data
+dfFile <- paste(dfName, ".csv", sep="")
+write.csv(df, here(outDir, dfFile))
+
 stamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 
-#Sink to text file
-sink(here(outDir, "metadata.txt"))
+#Sink metadata to text file
+sink(here(outDir, "metadata.md"))
+cat("# Metadata for the Southern Rockies Linked Disturbance GEDI Dataset \n")
 cat("This dataset includes GEDI points from 2019-2021 that are over forested areas of the Southern Rockies. \n")
 cat("Data points within a buffer of Census Bureau road polylines have been removed. \n")
 cat("Data points that had a fire or insect disturbance in the year of GEDI data collection have been removed. \n")
 cat("Disturbance data is from the disturbance stack derived by CU Boulder's CIRES Earth Lab in 2023. \n")
 cat("\n")
+cat("## Information \n")
 cat("Author: Tyler L. McIntosh \n")
 cat("Date generated: ", stamp, "\n")
-cat("GitHub repo with code for reproduction: https://github.com/tylerhoecker/linked_disturbance")
+cat("[GitHub repo with code for reproduction](https://github.com/tylerhoecker/linked_disturbance)")
 cat("\n")
 cat("\n")
+cat("## Metadata \n")
 cat(paste0(colnames(df_metadata), collapse = ' :: '), sep = "\n")
 cat("\n")
 cat(apply(df_metadata,1,paste0, collapse=' :: '), sep = "\n")
 sink()
 
 #Zip together
-zip::zip(zipfile = here(outDir, "linked_disturbance_southern_rockies_data_frame.zip"),
+zip::zip(zipfile = here(outDir, paste(dfName, ".zip", sep="")),
     files = c(here(outDir, dfFile),
-              here(outDir, "metadata.txt")),
+              here(outDir, "metadata.md")),
     mode = "cherry-pick")
 
+#Remove floating files
+file.remove(here(outDir, dfFile))
+file.remove(here(outDir, "metadata.md"))
+
+# Clean up ----
 #Stop cluster if on
 if(parallel == TRUE) {
   stopImplicitCluster()
