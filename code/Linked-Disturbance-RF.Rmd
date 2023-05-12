@@ -1,0 +1,275 @@
+---
+title: "Linked-Disturbance-RF"
+author: "Xiulin Gao"
+email:  "xiulingao@lbl.gov"
+date:   "10-May-2023"
+---
+## Introduction
+This script is used to do spatial random forest modeling of above-ground biomass for
+the Rocky Mountains using multi-predictors. 
+
+To run this notebook on jupyter notebook on HPC system, do following:
+1. convert to .ipynb in terminal: jupytext notebook-name.ipynb --output Linked-Disturbance-RF.Rmd
+2. create R environment and install all needed packages and r kernel to run on jupyter notebook
+   1) conda create -n my-R-env python=3.9
+   2) source activate my-R-env
+   3) conda install -c conda-forge mamba # currently the best package manager to solve environment conflicts for R
+   4) mamba install -c conda-forge r-raster r-rgeos r-rgal r-tidyverse r-sf r-spatialRF r-randomForestExplainer         r-irkernel  ## any package you want here, just be aware that sometimes the environment cannot be solved. 
+   5) launch jupyter notebook and select the R environment you just created to run this notebook.
+   
+
+
+```{r,label="reset-R",message=FALSE,results='hide'}
+
+# Unload all packages except for the R default ones
+plist = names(sessionInfo()$otherPkgs)
+if (length(plist) > 0){
+   dummy = sapply(X=paste0("package:",plist),FUN=detach,character.only=TRUE,unload=TRUE)
+}#end if (length(plist) > 0)
+
+
+# Remove all variables
+rm(list=ls())
+
+# Reset warnings
+options(warn=0)
+
+# Close all plots
+invisible(graphics.off())
+
+# Clean up
+invisible(gc())
+
+```
+
+
+
+
+```{r,label='load-packages',message=FALSE,results='hide'}
+library(tidyverse)
+library(spatialRF)
+library(ggplot2)
+library(data.table)
+library(pcaMethods)
+library(sf)
+
+
+```
+
+
+
+```{r,label='path-setting',message=FALSE,results='hide'}
+home_path = path.expand("~")
+git_path  = file.path(home_path,"linked_disturbance")
+data_main = file.path(git_path,"data")
+data_file = "linked_disturbance_data_frame.csv"
+
+```
+
+
+
+
+```{r,label='make-dir',message=FALSE,results='hide'}
+
+plot_main    = file.path(git_path,"results")
+explor_path  = file.path(plot_main,"explore-plots") 
+dummy        = dir.create(explor_path  , recursive = TRUE, showWarnings = FALSE)
+
+```
+
+
+
+
+
+```{r,label='plot-setting',message=FALSE,results='hide'}
+
+gg_device  = c("png")     # Output devices to use (Check ggsave for acceptable formats)
+gg_depth   = 600          # Plot resolution (dpi)
+gg_ptsz    = 18           # Font size
+gg_ptszl   = 26
+gg_width   = 17.5         # Plot width (units below)
+gg_widthn  = 14.5   
+gg_height  = 8.5          # Plot height (units below)
+gg_units   = "in"         # Units for plot size
+gg_screen  = TRUE         # Show plots on screen as well?
+ndevice    = length(gg_device)
+
+top12 <- c("#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499", 
+           "#44AA99", "#999933", "#882255", "#6699CC", "#888888", "#661100")
+
+
+
+
+```
+
+
+
+
+```{r,label='predictors-PCA',message=FALSE,results='hide'}
+
+mod_df      = fread(file.path(data_main,data_file))
+# select only quantitative columns for RF as spatialRF mainly deals with quantitative data
+var_class = split(names(mod_df),sapply(mod_df, function(x) paste(class(x), collapse=" ")))
+quant_var = c(var_class$integer,var_class$numeric)
+pred_x    = quant_var[-c(1:4,7,17:22,24,47,70,93,116:122)]
+pca_df  = mod_df %>% select(all_of(pred_x))
+pca_df  = prep(pca_df, scale="uv",center=TRUE)
+#varcors = cor(pca_df, method = "pearson", use = "pairwise")
+#corrplot::corrplot(varcors)
+npc     = 19
+fppca   = pca_df %>% pca(nPcs=npc, method="nipals") 
+summary(fppca)
+#biplot(fppca)
+fppca.loads = as.data.frame(loadings(fppca))
+
+### given PCA loading select some independent variables
+xs    = rownames(fppca.loads)
+pc_x  = list()
+for (p in sequence(npc)){
+  x_p  = xs[fppca.loads[p] > 0.2 | fppca.loads[p] < -0.2]
+  pc_x = append(pc_x,x_p)
+}
+
+pc_x  = unlist(pc_x)
+x_var = pc_x[!duplicated(pc_x)]
+
+rf_df = mod_df %>% select(all_of(c(x_var,"agbd","lat_lowest","lon_lowest","utm_z13n_easting","utm_z13n_northing")))
+
+
+```
+
+
+
+
+```{r,label='model-data-check',message=FALSE,results='hide'}
+## the spatialRF package does have special requirements for model data, so check first
+
+if (sum(apply(rf_df, 2, is.na)) > 0){rf_df = na.omit(rf_df)} # remove rows withn NAs
+zerosd_col  = names(apply(rf_df, 2, var) == 0)[apply(rf_df, 2, var) == 0] 
+na_find     = sapply(as.data.frame(scale(rf_df)), function(x)any(is.nan(x)))
+na_col      = names(na_find)[na_find] 
+inf_find    = sapply(as.data.frame(scale(rf_df)), function(x)any(is.infinite(x)))
+inf_col     = names(inf_find)[inf_find] 
+
+cat(paste0("columns with zero variance are",zerosd_col))
+cat(paste0("columns produce NAs when scale are",na_col))
+cat(paste0("columns produce Inf when scale are",inf_col))
+
+```
+
+
+
+
+
+```{r,label='multicollinearity-and-interactions',message=FALSE,results='hide'}
+
+y_var = "agbd"
+x_var = x_var #currently not include lon and lat as predictors
+cords = rf_df[, c("utm_z13n_easting","utm_z13n_northing")]
+names(cords)   = c("x","y")
+dist_matrix    = as.matrix(dist(cords, diag=TRUE, upper=TRUE))
+dist_threshold = c(0, 20000, 40000, 80000, 160000) # in same unit as the dist.matrix, which assume is m 
+seed           = 1
+
+# remove predictors that are highly correlated
+preference.order         = c( "elevation"
+                            , "speiCum5yrPrior"
+                            , "modisTreeVeg"
+                            , "chili"
+                            , "aspect"
+                            , "slope"
+                            )
+x_df                     = rf_df %>% select(all_of(x_var))
+predictor.variable.names =  auto_cor( x = x_df,
+                                      cor.threshold = 0.6,
+                                      preference.order = preference.order
+                                    ) %>% 
+                            auto_vif( vif.threshold = 2.5,
+                                      preference.order = preference.order
+                                    )
+
+x_update    = predictor.variable.names$selected.variables
+rfdf_update = rf_df %>% select(all_of(c("utm_z13n_easting","utm_z13n_northing",x_update,"agbd")))
+
+## interactions, this can run for long and out of memory space
+## suggest running this on HPC, NEVER run it on local machine 
+
+local.cluster  = parallel::makeCluster(parallel::detectCores() - 4,
+                                       type = "PSOCK")
+doParallel::registerDoParallel(cl = local.cluster)
+
+interactions = the_feature_engineer( data                     = rfdf_update
+                                   , dependent.variable.name  = y_var
+                                   , predictor.variable.names = x_update
+                                   , xy                       = cords
+                                   , importance.threshold     = 0.50 
+                                   , cor.threshold            = 0.60 
+                                   , seed                     = seed
+                                   , repetitions              = 100
+                                   , verbose                  = TRUE
+                                   , cluster                  = local.cluster
+                                   )
+
+parallel::stopCluster(cl = local.cluster)
+
+rfdf_update = interactions$data
+x_update    = interactions$predictor.variable.names
+
+```
+
+
+
+
+
+```{r,label='random-forest',message=FALSE,results='hide'}
+
+local.cluster  = parallel::makeCluster(parallel::detectCores() - 4,
+                                       type = "PSOCK")
+doParallel::registerDoParallel(cl = local.cluster)
+
+# non-spatial model
+agb_mod_nonsp  = rf( data                     = rfdf_update
+                   , dependent.variable.name  = y_var
+                   , predictor.variable.names = x_update
+                   , distance.matrix          = dist_matrix
+                   , distance.thresholds      = dist_threshold
+                   , xy                       = coords
+                   , seed                     = seed
+                   , verbose                  = FALSE
+                   , cluster                  = local.cluster
+                   )
+
+plot_residuals_diagnostics( agb_mod_nonsp
+                          , verbose = FALSE)
+plot_importance( agb_mod_nonsp
+                ,verbose = FALSE)
+
+# spatial model
+agb_mode_sp  =  rf_spatial( model   = agb_mod_nonsp
+                          , method  = "mem.moran.sequential"
+                          , verbose = FALSE
+                          , seed    = seed
+                          , cluster = local.cluster
+                          )                           %>% 
+                rf_tuning()                           %>% 
+                rf_evaluate()                         %>% 
+                rf_repeat()
+
+parallel::stopCluster(cl = local.cluster)
+
+# importance comparison
+
+p1 =  plot_importance( agb_mod_nonsp 
+                     , verbose = FALSE) + 
+      ggplot2::ggtitle("Non-spatial model") 
+
+p2 =  plot_importance( agb_mod_sp
+                     , verbose = FALSE) + 
+      ggplot2::ggtitle("Spatial model")
+
+p1 | p2 
+
+
+
+```
+
