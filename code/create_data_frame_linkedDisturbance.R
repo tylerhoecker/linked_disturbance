@@ -25,7 +25,7 @@
 ## Libraries ----
 
 #Check the required libraries and download if needed
-list.of.packages <- c("tidyverse","beepr", "terra", "sf", "mapview", "here", "tictoc", "doParallel", "zip")
+list.of.packages <- c("tidyverse","beepr", "terra", "sf", "mapview", "here", "tictoc", "doParallel", "zip", "exactextractr")
 new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
 if(length(new.packages)) install.packages(new.packages)
 
@@ -45,6 +45,7 @@ library(doParallel) #Package for multi-threaded computation in R
   #.export for functions and .packages for packages
 library(zip) #For zipping files (does not require external tools). mode = "cherry-pick" to select specific files w/o mirroring directory structure
 
+
 ## Clean workspace & set up environment ----
 rm(list=ls()) #Ensure empty workspace if running from beginning
 here() #Check here location
@@ -54,8 +55,8 @@ options(digits = 2) #Set standard decimal print output
 options(scipen = 999) #Turn scientific notation on and off (0 = on, 999 = off)
 options(error = beep) #activate beep on error
 
-parallel = FALSE #Change to "True" to enable parallel computing at geographic difference choke point
-dfName = "linked_disturbance_baby_data_frame" #NAME OF OUTPUT DF
+parallel = TRUE #Change to "True" to enable parallel computing at geographic difference choke point
+dfName = "linked_disturbance_data_frame" #NAME OF OUTPUT DF
 
 #Set up parallel computing
 if(parallel == TRUE) {
@@ -72,11 +73,15 @@ outDir <- here("data", "final")
 if (!dir.exists(outDir)){
   dir.create(outDir)
 }
+thisRun <- here(outDir, paste(dfName, format(Sys.time(), "%Y-%m-%d-%H-%M-%S-%Z"), sep = "_"))
+dir.create(thisRun)
 
 # Also set data directories
 sharedData <- here("data", "shared")
 rawData <- here("data", "raw_GEE")
 derivedData <- here("data", "derived")
+polygonData <- here("data", "polygons")
+
 
 
 ## Load data ----
@@ -88,6 +93,13 @@ datatype(disturbanceStack)
 #DEM Data
 demDats <- terra::rast(here(derivedData, "topography_southern_rockies.tif"))
 datatype(demDats)
+crs(demDats)
+
+#CHILI
+chili <- terra::rast(here(derivedData, "US_NED_10m_chili_southern_rockies.tif"))
+
+#Topographic index
+mtpi <- terra::rast(here(rawData, "US_NED_270m_mtpi_SouthernRockies_EPSG_32613_GEE.tif"))
 
 #Forest data
 forestMask <- terra::rast(here(derivedData, "forest_mask_nlcd_srockies.tif"))
@@ -109,12 +121,20 @@ modisTree <- terra::rast(here(rawData, "Modis_Percent_Tree_Cover_SouthernRockies
 modisQuality <- terra::rast(here(rawData, "Modis_Quality_SouthernRockies_EPSG_32613.tif"))
 
 #Roads
-roads <- sf::st_read(here(rawData, "Roads_Tiger_Census_SouthernRockies_EPSG_26913_GEE/Roads_Tiger_Census_SouthernRockies_EPSG_26913_GEE.shp")) %>%
-  sf::st_transform(crs(demDats))
+roads <- terra::rast(here(derivedData, "road_buffer_raster.tif"))
+
+#Hex grids
+hex5000 <- sf::st_read(here(derivedData, "hex5000_sr.geojson"))
+hex10000 <- sf::st_read(here(derivedData, "hex10000_sr.geojson"))
+hex50000 <- sf::st_read(here(derivedData, "hex50000_sr.geojson"))
+hex100000 <- sf::st_read(here(derivedData, "hex100000_sr.geojson"))
+
 
 #GEDI
-gedi <- sf::st_read(here(sharedData, "GEDI_4A_Hayman.geojson")) %>% sf::st_transform(crs(demDats))
-mapview(gedi)
+#gedi <- sf::st_read(here(sharedData, "GEDI_4A_Hayman.geojson")) %>% sf::st_transform(crs(demDats))
+gedi <- sf::st_read(here(sharedData, "gedi_sre", "gedi_sre", "gedi_sre_100.shp")) %>% sf::st_transform(crs(demDats))
+comp <- sf::st_read(here(sharedData, "gedi_sre", "gedi_sre", "gedi_sre_1.shp")) %>% sf::st_transform(crs(demDats))
+
 
 #NDVI
 ndviFileNms <- list.files(here(rawData),
@@ -123,46 +143,26 @@ ndviFileNms <- list.files(here(rawData),
 ndvi <- terra::rast(ndviFileNms)
 names(ndvi) <- c("NDVI2019", "NDVI2020", "NDVI2021")
 
+#EPA lvl 4
+epa4 <- sf::st_read(here(polygonData, "EPA_lvl4", "EPA_lvl4_SRockies_raw3.shp")) %>% 
+  sf::st_transform(crs(demDats))
+
+#Surface Management Agency (SMA)
+sma <- sf::st_read(here(polygonData, "sma", "BLM_CO_SMA.shp")) %>% 
+  sf::st_transform(crs(demDats))
+
 ### ### ### ### ### ### ### ### ### ### ### ###
 
-# SCRIPTED ANALYSIS ----
+tic("start run")
 
 # Manipulate GEDI data ----
 ## Get only points NOT within road buffer ----
-gediBB <- sf::st_bbox(gedi) %>%
-  sf::st_as_sfc()
-
-#Perform road buffer
-#buffer justification:
-#lanes are 3.7m each. 4 lanes = 15m, /2 = 7.5. +  13m = ~ 1/2 of GEDI 25m diameter.
-# = 21m buffer on each side of road line
-# Increase to 30m to be safe
-tic("buffer")
-roadBuff <- roads %>%
-  sf::st_filter(gediBB) %>%
-  sf::st_buffer(30) %>%
-  sf::st_union()
-toc()
-
-
-
-#Perform geographic difference w/ road buffer
-#Parallel compute option for very large datasets
-if(parallel == TRUE) {
-  tic("difference_parallel")
-  gedi <- foreach(i = 1:nrow(gedi),
-                  .packages = 'sf',
-                  .combine = 'rbind') %dopar% {
-                    pt <- gedi[i,] %>%
-                      sf::st_difference(roadBuff)
-                    return(pt)
-                  }
-  toc()
-} else {
-  tic("difference")
-  gedi <- gedi %>% sf::st_difference(roadBuff)
-  toc()
-}
+roadBinary <- roads %>%
+  terra::extract(gedi) %>%
+  select(-ID)
+gedi <- gedi %>%
+  cbind(roadBinary) %>%
+  filter(is.na(roadBuffer))
 
 
 ## Add basic gedi data ----
@@ -173,27 +173,59 @@ gedi <- gedi %>%
   mutate(utm_z13n_easting = unlist(map(gedi$geometry, 1)),
          utm_z13n_northing = unlist(map(gedi$geometry, 2)))
 
-#Also rename original lat/long
-gedi <- gedi %>%
-  rename(latEPSG4326 = lat_lowestmode,
-         longEPSG4326 = lon_lowestmode)
 
 #Add collection date
-###########################################
-#FIX THIS TO BE CORRECT -- THIS IS JUST CREATING FAKE DATA RIGHT NOW
-###########################################
+# gedi <- gedi %>%
+#   mutate(gediYear = 2020)
 gedi <- gedi %>%
-  mutate(gediYear = case_when(round(utm_z13n_easting, 0) %% 2 == 0 ~ 2020,
-                              round(utm_z13n_easting, 0) %% 2 != 0 ~ 2019))
+   mutate(gediYear = year(date))
+
+unique(gedi$gediYear) #see all years in dataset
 
 gediYr <- setNames(gedi$gediYear, "gediYear")
 
 # Wrangle simple data & extract ----
 
 # DEM
+tic("terra")
 demD <- demDats %>%
   terra::extract(gedi) %>%
   select(-"ID", -"hillshade")
+toc()
+
+# tic("exact")
+# t <- demDats %>%
+#   exactextractr::exact_extract(gedi)
+# toc()
+
+chiliD <- chili %>%
+  terra::extract(gedi) %>%
+  select(-"ID") %>%
+  `names<-`(c('chili'))
+
+mtpiD <- mtpi %>%
+  terra::extract(gedi) %>%
+  select(-"ID") %>%
+  `names<-`(c('mtpi'))
+
+demD <- cbind(demD, chiliD, mtpiD)
+
+
+# Data from polygons, spatial joined to GEDI data
+hexD <- gedi %>% sf::st_join(hex100000) %>%
+  sf::st_join(hex50000) %>%
+  sf::st_join(hex10000) %>%
+  sf::st_join(hex5000) %>%
+  as.data.frame() %>%
+  select(starts_with('hex'))
+
+epaD <- gedi %>% sf::st_join(epa4) %>%
+  as.data.frame() %>%
+  select(US_L4CODE, US_L4NAME)
+
+smaD <- gedi %>% sf::st_join(sma) %>%
+  as.data.frame() %>%
+  select(adm_code)
 
 
 # Forest data
@@ -224,21 +256,32 @@ modis <- c(modisNonVeg$Percent_NonVegetated_2019_03_06,
            modisNonTree$Percent_NonTree_Vegetation_2020_03_05,
            modisTree$Percent_Tree_Cover_2020_03_05)
 
+modis2000 <- c(modisNonVeg$Percent_NonVegetated_2000_03_05,
+               modisNonTree$Percent_NonTree_Vegetation_2000_03_05,
+               modisTree$Percent_Tree_Cover_2000_03_05)
+
 modisD <- modis %>%
-  terra::extract(gedi)%>%
+  terra::extract(gedi) %>%
   select(-"ID") %>%
   cbind(gediYr) %>%
   mutate(modisNonVeg = case_when(gediYr == 2021 ~ NA,
                                  gediYr == 2020 ~ Percent_NonVegetated_2020_03_05,
                                  gediYr == 2019 ~ Percent_NonVegetated_2019_03_06)) %>%
   mutate(modisNonTreeVeg = case_when(gediYr == 2021 ~ NA,
-                                 gediYr == 2020 ~ Percent_NonTree_Vegetation_2020_03_05,
-                                 gediYr == 2019 ~ Percent_NonTree_Vegetation_2019_03_06)) %>%
+                                     gediYr == 2020 ~ Percent_NonTree_Vegetation_2020_03_05,
+                                     gediYr == 2019 ~ Percent_NonTree_Vegetation_2019_03_06)) %>%
   mutate(modisTreeVeg = case_when(gediYr == 2021 ~ NA,
-                                 gediYr == 2020 ~ Percent_Tree_Cover_2020_03_05,
-                                 gediYr == 2019 ~ Percent_Tree_Cover_2019_03_06)) %>%
+                                  gediYr == 2020 ~ Percent_Tree_Cover_2020_03_05,
+                                  gediYr == 2019 ~ Percent_Tree_Cover_2019_03_06)) %>%
   select(modisNonVeg, modisNonTreeVeg, modisTreeVeg)
 
+modis2000D <- modis2000 %>%
+  terra::extract(gedi) %>%
+  select(-"ID")  %>%
+  `names<-`(c("modisNonVeg2000", "modisNonTreeVeg2000", "modisTreeVeg2000"))
+
+## EPA_4 ----
+#epa4D <- st
 
 ## Climate ----
 climNormD <- climNorm %>%
@@ -277,7 +320,14 @@ climSPEID <- spei %>%
   cbind(gediYr) %>%
   spei_in_x_yr_prior_full()
 
-climateD <- cbind(climNormD, climSPEID)
+cumSPEID <- climSPEID %>%
+  mutate(speiCum5yrPrior = rowSums(select(.,1:5))) %>%
+  mutate(speiCum10yrPrior = rowSums(select(.,1:10))) %>%
+  mutate(speiCum15yrPrior = rowSums(select(.,1:15))) %>%
+  mutate(speiCum20yrPrior = rowSums(select(.,1:20))) %>%
+  select(starts_with("speiCum"))
+
+climateD <- cbind(climNormD, climSPEID, cumSPEID)
 
 ## NDVI ----
 ndviD <- ndvi %>%
@@ -307,38 +357,38 @@ distD <- disturbanceStack %>%
 
 fire <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
-                                 .==1 ~ 1,
-                                 .==2 ~ 0,
-                                 .==3 ~ 0,
-                                 .==4 ~ 1,
-                                 .==5 ~ 0))) %>%
+                                          .==1 ~ 1,
+                                          .==2 ~ 0,
+                                          .==3 ~ 0,
+                                          .==4 ~ 1,
+                                          .==5 ~ 0))) %>%
   cbind(gediYr)
 
 hotDrought <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
-                                 .==1 ~ 0,
-                                 .==2 ~ 0,
-                                 .==3 ~ 1,
-                                 .==4 ~ 1,
-                                 .==5 ~ 0))) %>%
+                                          .==1 ~ 0,
+                                          .==2 ~ 0,
+                                          .==3 ~ 1,
+                                          .==4 ~ 1,
+                                          .==5 ~ 0))) %>%
   cbind(gediYr)
 
 insect <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
-                                 .==1 ~ 0,
-                                 .==2 ~ 1,
-                                 .==3 ~ 0,
-                                 .==4 ~ 0,
-                                 .==5 ~ 1))) %>%
+                                          .==1 ~ 0,
+                                          .==2 ~ 1,
+                                          .==3 ~ 0,
+                                          .==4 ~ 0,
+                                          .==5 ~ 1))) %>%
   cbind(gediYr)
 
 anyCombo <- distD %>%
   mutate(across(1:ncol(distD), ~case_when(.==0 ~ 0,
-                                 .==1 ~ 0,
-                                 .==2 ~ 0,
-                                 .==3 ~ 0,
-                                 .==4 ~ 1,
-                                 .==5 ~ 1))) %>%
+                                          .==1 ~ 0,
+                                          .==2 ~ 0,
+                                          .==3 ~ 0,
+                                          .==4 ~ 1,
+                                          .==5 ~ 1))) %>%
   cbind(gediYr)
 
 
@@ -353,14 +403,14 @@ time_since_last <- function(dats, distNm) {
   #Use NA as entry when there are no cases of the disturbance in the stack prior to gedi collection date
   #Otherwise, calculate years since, NOT including year of data collection
   yrsS <- dats %>% transmute({{colNm1}} := case_when(gediYr == 2021 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
-                                                                               rowSums(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`))!=0 ~ 
-                                                                                 max.col(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`), ties.method = "first")),
-                                                    gediYr == 2020 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
-                                                                               rowSums(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`))!=0 ~ 
-                                                                                 max.col(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`), ties.method = "first")),
-                                                    gediYr == 2019 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
-                                                                               rowSums(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`))!=0 ~ 
-                                                                                 max.col(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`), ties.method = "first"))))
+                                                                                rowSums(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`))!=0 ~
+                                                                                  max.col(across(`forest-disturbance-s-rockies-2020`:`forest-disturbance-s-rockies-1999`), ties.method = "first")),
+                                                     gediYr == 2020 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
+                                                                                rowSums(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`))!=0 ~
+                                                                                  max.col(across(`forest-disturbance-s-rockies-2019`:`forest-disturbance-s-rockies-1999`), ties.method = "first")),
+                                                     gediYr == 2019 ~ case_when(rowSums(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`))==0 ~ NA,
+                                                                                rowSums(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`))!=0 ~
+                                                                                  max.col(across(`forest-disturbance-s-rockies-2018`:`forest-disturbance-s-rockies-1999`), ties.method = "first"))))
   #calculate collection year disturbance binary
   cYD <- dats %>% transmute({{colNm2}} := case_when(gediYr == 2021 ~ NA,
                                                     gediYr == 2020 ~ `forest-disturbance-s-rockies-2020`,
@@ -410,47 +460,82 @@ distD <- cbind(hotD, fireD, insectD, comboD)
 
 df <- gedi %>%
   cbind(modisD) %>%
+  cbind(modis2000D) %>%
   cbind(ndviD) %>%
   cbind(demD) %>%
   cbind(forestD) %>%
+  cbind(hexD) %>%
+  cbind(epaD) %>%
+  cbind(smaD) %>%
   cbind(climateD) %>%
   cbind(distD)
 
 ## Filter data ----
 
-df <- df %>%
+df_filt <- df %>%
   filter(forestMask == 1) %>% #Forest-only
   filter(collectionYrFire == 0) %>% #Remove data points where a fire or insect disturbance occurred in the collection year
-  filter(collectionYrInsect == 0)
+  filter(collectionYrInsect == 0) %>%
+  filter(adm_code == "USFS") #Only points over USFS lands
 
+
+
+toc()
 
 ## Create metadata ----
-columns <- c(colnames(df)[1:19],
+columns <- c(colnames(df_filt)[1:44],
              "spei...",
+             "speiCum...",
              "yrsSince...",
              "collectionYr...",
              "...YrsInPriorX",
              "...combo...")
-description <- c("Latitude in EPSG4326",
+description <- c("GEDI collection date",
+                 "GEDI beam",
+                 "GEDI shot number",
+                 "unknown",
+                 "unknwon",
+                 "unknown",
+                 "unknown",
+                 "sensitivity?",
+                 "Latitude in EPSG4326",
                  "Longitude in EPSG4326",
+                 "Elevation",
+                 "tree cover?",
+                 "Plant functional type class",
+                 "Aboveground Biomass from GEDI 4A product standard error?",
                  "Aboveground Biomass from GEDI 4A product",
+                 "Within road buffer? 1 = yes, NA = no",
                  "UTM Z 13N Northing",
                  "UTM Z 13N Easting",
                  "Year of GEDI data collection",
                  "Modis non vegetated % cover in year of GEDI data collection, NA indicates data unavailable",
                  "Modis non-tree vegetated % cover in year of GEDI data collection, NA indicates data unavailable",
                  "Modis tree % cover in year of GEDI data collection, NA indicates data unavailable",
+                 "Modis non vegetated % cover in 2000, NA indicates data unavailable",
+                 "Modis non-tree vegetated % cover in 2000, NA indicates data unavailable",
+                 "Modis tree % cover in 2000, NA indicates data unavailable",
                  "Peak NDVI in year of GEDI data collection, derived from Landsat",
                  "Topographic aspect derived from USGS SRTM 30m DEM",
                  "Topographic slope derived from USGS SRTM 30m DEM",
                  "Topographic elevation from USGS SRTM 30m DEM",
                  "McCune & Keon Heat Load Index (HLI) from USGS SRTM 30m DEM",
+                 "CHILI heat load index",
+                 "MTPI",
                  "Forest mask, binary: pixels with any type of forested cover at any point in NLCD dataset",
                  "Forest code: NLCD codes of modal forest cover for pixel",
                  "Forest type: NLCD human-readable forest cover type associated with code",
+                 "hex id 100000m size",
+                 "hex id 50000m size",
+                 "hex id 10000m size",
+                 "hex id 5000m size",
+                 "EPA level 4 code",
+                 "EPA level 4 name",
+                 "Surface Management Agency code",
                  "30-yr average of AET from TopoFire, Holden et al.",
                  "30-yr average of CWD from TopoFire, Holden et al.",
                  "Standardized Precipitaion Evapotranspiration Index (SPEI) with climatic water balance aggregated over the year prior to a given date. Averaged for each calendar year and provided for each year X years prior to GEDI data collection. NA indicates out of data timeframe",
+                 "Cumulative SPEI over the time period specified",
                  "Number of years since an event of the given disturbance type, exclusive of GEDI collection year. NA indicates disturbance was never present in available data",
                  "Presence of given disturbance in year of GEDI collection, binary",
                  "Number of years of given disturbance in the X years prior to GEDI data collection. NA indicates that X is beyond the time frame of the available data",
@@ -462,12 +547,12 @@ df_metadata <- cbind(columns, description)
 
 #Write data
 dfFile <- paste(dfName, ".csv", sep="")
-write.csv(df, here(outDir, dfFile))
+write_csv(df_filt, here(thisRun, dfFile))
 
 stamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 
 #Sink metadata to text file
-sink(here(outDir, "metadata.md"))
+sink(here(thisRun, "metadata.md"))
 cat("# Metadata for the Southern Rockies Linked Disturbance GEDI Dataset \n")
 cat("This dataset includes GEDI points from 2019-2021 that are over forested areas of the Southern Rockies. \n")
 cat("Data points within a buffer of Census Bureau road polylines have been removed. \n")
@@ -487,19 +572,21 @@ cat(apply(df_metadata,1,paste0, collapse=' :: '), sep = "\n")
 sink()
 
 #Zip together
-zip::zip(zipfile = here(outDir, paste(dfName, ".zip", sep="")),
-    files = c(here(outDir, dfFile),
-              here(outDir, "metadata.md")),
+zip::zip(zipfile = here(thisRun, paste(dfName, ".zip", sep="")),
+    files = c(here(thisRun, dfFile),
+              here(thisRun, "metadata.md")),
     mode = "cherry-pick")
 
 #Remove floating files
-file.remove(here(outDir, dfFile))
-file.remove(here(outDir, "metadata.md"))
+# file.remove(here(thisRun, dfFile))
+# file.remove(here(thisRun, "metadata.md"))
 
 # Clean up ----
 #Stop cluster if on
 if(parallel == TRUE) {
   stopImplicitCluster()
 }
+
+
 
 

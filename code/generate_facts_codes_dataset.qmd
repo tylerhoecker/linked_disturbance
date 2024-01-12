@@ -1,0 +1,178 @@
+# Generate FACTS codes dataset
+
+Tyler L. McIntosh
+CU Boulder CIRES Earth Lab
+Last updated: 12/18/23
+
+This script uses the following naming conventions wherever possible:
+ lowerCamelCase for variables
+ period.separated for functions
+ underscore_separated for files
+ 
+# Description of pre-script steps
+ 
+ A PDF of FACTS codes can be found at this url: https://www.fs.usda.gov/Internet/FSE_DOCUMENTS/fseprd539041.pdf
+ 
+ This PDF was converted into a Word document to format the table properly, and then copied into Excel.
+ In Excel, separate sheets were created for activity codes, activity code descriptions, and inactive codes.
+ Spacing and formatting was cleaned. These sheets were converted to .csv files for use in this script.
+ 
+# Additional relevant information from PDF
+ 
+## Activity Code Groupings
+FACTS activity codes are numerically grouped into these categories:
+• 1000 – Fire
+• 2000 - Range
+• 3000 – Cultural Resources and Recreation
+• 4000 – Timber and Silviculture
+• 5000 – Soil, Air and Watershed
+• 6000 – Wildlife; Threatened, Endangered, and Sensitive, and Fisheries
+• 7000 – Vegetation/Restoration
+• 8000 – Miscellaneous
+• 9000 - Engineering
+
+## Activity Codes and Descriptions
+The table below includes all active FACTS’ activity codes and their attributes. Codes with a link
+(are underlined) can be clicked on to view a more detailed description. Activity codes marked
+with an asterisk (*) require a Fire Regime Condition Class (FRCC) observation to be entered in
+FACTS if the Key Point Area field is set to 3 or 6.
+The following table includes detailed descriptions of select activity codes.
+
+## Feature type
+Area (A), Point(P), or Line(L)
+
+
+## Common Abbreviations
+• 2A = 2 ages
+• EA = even age
+• FH = final harvest
+• NFH = not final harvest
+• NRH = not regeneration harvest
+• NRN = no regeneration need
+• RH = regeneration harvest
+• RN = reforestation need created
+• UA = uneven aged
+
+## Inactive codes
+The table below only includes activity codes that are inactive (active flag = N). You may still query the database for records tied to these activity codes, but you cannot associate them with new data. These codes are used by the WebNet application.
+
+#Load packages etc
+
+```{r load_packages, echo = FALSE, warning = FALSE, message = FALSE, cache = FALSE}
+# SETUP ----
+## Libraries ----
+
+#Check the required libraries and download if needed
+list.of.packages <- c("tidyverse", #Includes ggplot2, dplyr, tidyr, readr, purrr, tibble, stringr, forcats
+                      "here", #Relative path best practices
+                      "glue") #easy strings
+
+#Install all packages that aren't installed yet
+install.packages(setdiff(list.of.packages, rownames(installed.packages())))
+
+#Load all packages
+invisible(lapply(list.of.packages, library, character.only = TRUE)) #use 'invisible' to prevent output being displayed
+
+here::i_am("code/generate_facts_codes_dataset.qmd")
+
+
+```
+
+#Load all CSVs
+
+```{r load_data}
+factsCodes <- readr::read_csv(here::here('data', 'raw', 'facts_codes.csv')) |>
+  as.data.frame()
+factsDesc <- readr::read_csv(here::here('data', 'raw', 'facts_codes_descriptions.csv')) |>
+  as.data.frame()
+factsInactive <- readr::read_csv(here::here('data', 'raw', 'facts_codes_inactive.csv')) |>
+  as.data.frame()
+```
+
+
+```{r manipulate_data}
+#Create standard column names
+names(factsCodes) <- c('ActivityCode', 'Activity', 'NeedsAdjustment', 'NeedsCreation', 'FeatureType', 'UnitOfMeasure')
+names(factsDesc) <- c('ActivityCode', 'Activity', 'Description')
+names(factsInactive) <- c('ActivityCode', 'Activity', 'NeedsAdjustment', 'NeedsCreation', 'FeatureType', 'UnitOfMeasure')
+
+
+#Remove extra NAs from factsDesc
+factsDesc <- factsDesc |>
+  dplyr::filter(!is.na(ActivityCode) | !is.na(Activity) | !is.na(Description))
+
+#Function to create asterisk column
+create.asterisk.col <- function(dat) {
+  out <- dat |>
+  dplyr::mutate(Asterisk = dplyr::case_when(endsWith(ActivityCode, "*") ~ "Y",
+                                            TRUE ~ "N"),
+                ActivityCode = dplyr::case_when(endsWith(ActivityCode, "*") ~ substr(ActivityCode, 0, 4),
+                                     TRUE ~ ActivityCode))
+  return(out)
+}
+factsCodes <- create.asterisk.col(factsCodes)
+factsDesc <- create.asterisk.col(factsDesc) |> #use function to clean up ActivityCodes, then drop asterisk column
+  dplyr::select(-Asterisk)
+factsInactive <- create.asterisk.col(factsInactive)
+
+
+#Fix the multi-row accidental split problem
+#A function to fix the multi-cell issue
+fix.multi.cell <- function(df) {
+  df <- df|>
+    tidyr::fill(ActivityCode, .direction = c("down")) #Fill in codes
+  newTbl <- data.frame()
+  codes <- unique(df$ActivityCode)
+  for (c in codes) {
+    r <- df |> dplyr::filter(ActivityCode == c)
+    if(nrow(dat) == 1) {
+      newTbl <- rbind(newTbl, r)
+    } else {
+      newRow <- first(r)
+      a <- r$Activity
+      act <- paste0(a[!is.na(a)], collapse = "")
+      if("Description" %in% names(df)) {
+        d <- r$Description
+        desc <- paste0(d[!is.na(d)], collapse = "")
+        newRow <- newRow |>
+          mutate(Description = desc,
+               Activity = act)
+        newTbl <- rbind(newTbl, newRow)
+      } else {
+        newRow <- newRow |>
+          mutate(Activity = act)
+        newTbl <- rbind(newTbl, newRow)
+      }
+    }
+  }
+  return(newTbl)
+}
+factsCodes <- factsCodes |>
+  fix.multi.cell()
+factsDesc <- factsDesc |>
+  fix.multi.cell()
+factsInactive <- factsInactive |>
+  fix.multi.cell()
+
+#create main dataset with column for if it is active or inactive, etc
+factsCodes <- factsCodes |>
+  dplyr::mutate(Active = "Y")
+factsInactive <- factsInactive |>
+  dplyr::mutate(Active = "N")
+factsAll <- rbind(factsCodes, factsInactive) |>
+  dplyr::left_join(dplyr::select(factsDesc, -Activity), dplyr::join_by("ActivityCode")) |>
+  dplyr::mutate(Description = dplyr::case_when(is.na(Description) ~ "No description provided",
+                                               TRUE ~ Description))
+
+factsActivePoly <- factsAll |>
+  dplyr::filter(Active == "Y" & FeatureType == "A")
+
+```
+
+
+```{r export_data}
+
+readr::write_csv(factsAll, here::here('data', 'derived', 'facts_codes_all_cleaned.csv'))
+readr::write_csv(factsActivePoly, here::here('data', 'derived', 'facts_codes_active_poly_cleaned.csv'))
+
+```

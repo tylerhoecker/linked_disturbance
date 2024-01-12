@@ -1,0 +1,196 @@
+[DESCRIPTION OF SCRIPT]
+
+Tyler L. McIntosh
+CU Boulder CIRES Earth Lab
+Last updated: 12/18/23
+
+This script uses the following naming conventions wherever possible:
+ lowerCamelCase for variables
+ period.separated for functions
+ underscore_separated for files
+
+
+# Set libraries
+
+```{r}
+
+#Select library chunks from R_Libraries.txt and add to "list.of.packages"
+
+######Utility libraries
+utility <- c(
+ 	"tictoc", #benchmarking
+	"beepr", # beep() will make a noise. options(error = beep) will beep on any errors
+	"zip", #For zipping files (does not require external tools). mode = "cherry-pick" to select specific files w/o mirroring directory structure
+	"units", #for managing units
+	"remotes", #to access github
+	"here", #Relative path best practices
+	"profvis" #Profiling of code for efficiency and identifying bottlenecks
+)
+
+
+#####Data management libraries
+dataManagement <- c(
+	"tidyverse", #Includes: dplyr, forcats, ggplot2, lubridate, purrr, readr, stringr, tibble, tidyr
+	"glue", #Easy string management
+	"data.table" #More efficient dataframes and csv read/write
+)
+
+######GitHub libraries - any library from GitHub that needs to be installed via 'remotes'
+github <- c(
+	"tomroh/ecoregions" #pull EPA ecoregion polygons
+)
+
+#####Geographic libraries
+geographicStandard <- c(
+	"terra",  #New raster data package, documentation pdf here: https://cran.r-project.org/web/packages/terra/terra.pdf
+#When writing rasters, always specify data type to optimize storage & future computation:
+#https://search.r-project.org/CRAN/refmans/raster/html/dataType.html
+	"sf", #New vector package
+	"landscapemetrics" #Fragstats alternative
+)
+
+
+
+#ADD LIBRARY CHUNKS HERE
+list.of.packages <- c(utility, dataManagement, geographicStandard, github)
+
+```
+
+
+
+# Setup libraries & workspace
+
+```{r}
+
+#Install all CRAN packages that aren't installed yet
+install.packages(setdiff(list.of.packages, rownames(installed.packages())))
+
+#Install all packages from GitHub (if any) using remotes package that aren't installed yet
+if(exists("github")) { #If there are github-dependant packages...
+  library(remotes) #load remotes package
+  for(package in github) {
+    if(! package %in% rownames(installed.packages())) {
+      remotes::install_github(package) #Install package
+    }
+  }
+}
+
+#Replace GitHub package names in list.of.packages with the actual name of the package to load
+github_names <- sub(".*/", "", github)  # Extract names after "/"
+list.of.packages <- gsub(paste(github, collapse = "|"), github_names, list.of.packages)
+
+#Load all packages
+invisible(lapply(list.of.packages, library, character.only = TRUE)) #use 'invisible' to prevent output being displayed
+
+
+# Clean workspace & set up environment
+here::here() #Check here location
+here::i_am("code/southern_rockies_land_management.Rmd")
+#OR
+#setwd() #Set working directory directly
+options(digits = 6) #Set standard decimal print output
+options(scipen = 999) #Turn scientific notation on and off (0 = on, 999 = off)
+
+```
+
+# Create necessary directories - delete any unnecessary
+
+```{r}
+# Figures directory
+figsDir <- here::here("figs")
+if (!dir.exists(figsDir)){
+  dir.create(figsDir)
+}
+
+#Derived data directory
+datDerDir <- here::here("data/derived")
+if (!dir.exists(datDerDir)){
+  dir.create(datDerDir)
+}
+
+```
+
+#Get CRS of project
+
+```{r}
+rawData <- here("data", "raw_GEE")
+topoFileNames <- list.files(rawData, pattern = "USGS_SRTM*", full.names=TRUE)
+topo_SRockies <- terra::rast(topoFileNames)
+useCrs <- terra::crs(topo_SRockies)
+srExt <- terra::ext(topo_SRockies)
+srRes <- terra::res(topo_SRockies)
+rm(topoFileNames, topo_SRockies)
+```
+
+```{r}
+#################################
+######## Load management data and prep
+#################################
+
+epaL3 <- ecoregions::ContinentalUsEcoregion3 %>% 
+  sf::st_transform(useCrs)
+
+sRockies <- epaL3 |>
+  dplyr::filter(us_l3name %in% c("Southern Rockies")) |>
+  dplyr::group_by(us_l3name) |>
+  dplyr::summarize(geometry = st_union(geometry))
+rm(epaL3)
+
+
+emptySR <- rast(srExt, resolution = srRes)
+
+#HAZARDOUS FUEL TREATMENT
+hazFuelTrt <- sf::st_read(here::here('data', 'polygons', 'S_USA.Activity_HazFuelTrt_PL.gdb', 'S_USA.Activity_HazFuelTrt_PL.gdb'),
+                          layer = "Activity_HazFuelTrt_PL")
+head(hazFuelTrt)
+
+srHazFuelTrt <- hazFuelTrt |>
+  dplyr::mutate(YEAR_COMPLETED = lubridate::year(as.Date(DATE_COMPLETED)),
+                YEARS_BEFORE_2020 = 2020 - YEAR_COMPLETED) |>
+  dplyr::filter(YEAR_COMPLETED >= 1999 & STAGE_VALUE == "Accomplished") |>
+  sf::st_transform(useCrs)
+
+# t <- srHazFuelTrt|>
+#   sf::st_make_valid() |>
+#   sf::st_overlaps(sRockies)
+
+thinning <- srHazFuelTrt |>
+  dplyr::filter(TREATMENT_TYPE == "Thinning")
+t <- terra::vect(as(thinning, "Spatial"))
+
+srThinningRast <- terra::rasterize(terra::vect(thinning), emptySR, field = "YEARS_BEFORE_2020", fun = "min")
+
+
+
+
+
+#CFLRP
+
+cflrp <- sf::st_read(here::here('data', 'polygons', 'S_USA.Activity_CFLRP_PL', 'S_USA.Activity_CFLRP_PL.shp'))
+
+filt_cflrp <- cflrp |>
+  dplyr::mutate(YEAR_COMPLETED = lubridate::year(as.Date(DATE_COMPLETED)),
+                YEARS_BEFORE_2020 = 2020 - YEAR_COMPLETED) |>
+  dplyr::filter(YEAR_COMPLETED >= 1999 & STAGE_VALUE == "Accomplished") |>
+  sf::st_transform(useCrs)
+
+head(cflrp)
+unique(cflrp$ACTIVITY_N)
+unique(cflrp$TREATMENT_)
+
+t <- cflrp |> filter(TREATMENT_ == "Thinning")
+unique(t$ACTIVITY_N)
+
+t <- cflrp |> filter(TREATMENT_ == "Biomass Removal")
+unique(t$ACTIVITY_N)
+head(t)
+
+t <- cflrp |> filter(TREATMENT_ == "Stand clearcutting (")
+unique(t$ACTIVITY_N)
+
+t <- cflrp |> filter(ACTIVITY_C == "1254")
+unique(t$ACTIVITY_N)
+
+codes <- unique(cflrp$ACTIVITY_C)
+
+```
